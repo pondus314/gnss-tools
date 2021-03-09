@@ -6,9 +6,42 @@ import sys
 import numpy as np
 
 
+# TODO: add documentation to functions and classes here
+
 def parse_rinex_decimal(rinex_decimal: str):
     rinex_decimal = rinex_decimal.strip()
     return float(rinex_decimal.replace("D", "E"))
+
+
+class ObservableData:
+    def __init__(self,
+                 timestamps: List[datetime.datetime],
+                 obs_data: List[Dict[str, Union[int, float]]],
+                 obs_name: str,
+                 pr_type: bool):
+        self.timestamps = timestamps
+        self.observable_data = obs_data
+        self.obs_name = obs_name
+        self.pr_type = pr_type
+
+    @staticmethod
+    def extract_pr_ttx(obs_data):
+        obs_ttx = []
+        lightspeed = 299792458
+        timestamps = obs_data.timestamps
+        pr_data = obs_data.observable_data
+        for i in range(len(pr_data)):
+            date = timestamps[i]
+            week_nanos = (date.weekday() + 1 % 7) * 86400 * (10 ** 9)
+            week_nanos += (date - date.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds() * 10 ** 9
+            ttx = dict()
+            for sat in pr_data[i].keys():
+                pr = pr_data[i][sat]
+                pr_nanos = (pr * 10 ** 9) / lightspeed
+                ttx_nanos = week_nanos - pr_nanos
+                ttx[sat] = ttx_nanos
+            obs_ttx.append(ttx)
+        return obs_ttx
 
 
 class ObservationData:
@@ -45,8 +78,6 @@ class ObservationData:
 
         timestamps = []
         sat_data = []
-        print(observ_count)
-
         while line := rinf.readline():
             line = line.rstrip()
             timestamp: List[Union[int, float]] = list(map(int, [line[i * 3:i * 3 + 3] for i in range(5)]))
@@ -65,9 +96,9 @@ class ObservationData:
                 line = rinf.readline().rstrip()
                 sats_left -= 12
                 sats += [line[32 + 3 * i:35 + 3 * i] for i in range(min(sats_left, 12))]
-            store = dict([])
+            store = dict()
             for sat in sats:
-                store[sat] = dict([])
+                store[sat] = dict()
             for sat_num in range(sat_count):
                 sat = sats[sat_num]
                 for observ_num in range(observ_count):
@@ -101,7 +132,7 @@ class ObservationData:
         timestamps_out = []
         sat_data = obs_data.sat_data
         for i in range(obs_data.measurement_count):
-            obs = dict([])
+            obs = dict()
             date = obs_data.timestamps[i]
             for sat in sat_data[i].keys():
                 if only_gps and not sat.startswith("G"):
@@ -112,35 +143,18 @@ class ObservationData:
             if len(obs) > 0:
                 observ_data.append(obs)
                 timestamps_out.append(date)
-        return observ_data, timestamps_out
-
-    @staticmethod
-    def extract_pr_ttx(pr_data: List[Dict[str, Union[int, float]]], timestamps):
-        obs_ttx = []
-        lightspeed = 299792458
-        for i in range(len(pr_data)):
-            date = timestamps[i]
-            week_nanos = (date.weekday() + 1 % 7) * 86400 * (10 ** 9)
-            week_nanos += (date - date.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds() * 10 ** 9
-            ttx = dict([])
-            for sat in pr_data[i].keys():
-                pr = pr_data[i][sat]
-                pr_nanos = (pr * 10 ** 9) / lightspeed
-                ttx_nanos = week_nanos - pr_nanos
-                ttx[sat] = ttx_nanos
-            obs_ttx.append(ttx)
-        return obs_ttx
+        return ObservableData(timestamps_out, observ_data, observ, (observ.startswith("C") or observ.startswith("P")))
 
 
 class NavigationData:
     def __init__(self, sats_data, ion_data=None, delta_utc=None, leap_secs=None):
-        self.ion_data: List[List[float]] = ion_data
+        self.ion_data: List[List[np.float64]] = ion_data
         self.sats_data: Dict[str, List[ephemeris_data.EphemerisData]] = sats_data
         self.delta_utc = delta_utc
         self.leap_secs = leap_secs
 
     @classmethod
-    def process_rinex(cls, filename: str):
+    def process_gps_rinex(cls, filename: str):
         rinf = open(filename, "r")
         header = True
         ion_data = None
@@ -157,17 +171,17 @@ class NavigationData:
                     ion_data = [[], []]
                 ion_data[1] = list(map(parse_rinex_decimal, [line[i * 12 + 2:i * 12 + 14] for i in range(4)]))
             elif line.endswith("DELTA-UTC: A0,A1,T,W"):
-                delta_utc = list(map(parse_rinex_decimal, [line[3:22, 22:41]])) + [int(line[41:50]), int(line[50:59])]
+                delta_utc = list(map(parse_rinex_decimal, [line[3:22], line[22:41]])) + [int(line[41:50]), int(line[50:59])]
             elif line.endswith("LEAP SECONDS"):
                 leap_secs = int(line[4:10])
             elif line.endswith("END OF HEADER"):
                 header = False
 
-        sats_data = dict([])
-        timestamps = dict([])
+        sats_data = dict()
+        timestamps = dict()
         while line := rinf.readline():
             line = line.rstrip()
-            sat_id = int(line[:2])
+            sat_id = "G{:02d}".format(int(line[:2]))
             timestamp: List[Union[int, float]] = list(map(int, [line[i * 3 + 2:i * 3 + 5] for i in range(5)]))
             timestamp.append(float(line[17:22]))
             date = datetime.datetime(timestamp[0] + 2000, timestamp[1], timestamp[2], timestamp[3], timestamp[4],
@@ -180,7 +194,7 @@ class NavigationData:
             for i in range(29):
                 if i % 4 == 3:
                     line = rinf.readline()
-                data = parse_rinex_decimal(line[3 + 19 * i:22 + 19 * i])
+                data = parse_rinex_decimal(line[3 + 19 * ((i + 1) % 4):22 + 19 * ((i + 1) % 4)])
                 eph_data.append(data)
 
             eph = ephemeris_data.EphemerisData(date, eph_data)
@@ -191,10 +205,10 @@ class NavigationData:
         return cls(sats_data, ion_data=ion_data, delta_utc=delta_utc, leap_secs=leap_secs)
 
     def get_relevant_ephemeris(self, timestamp: datetime.datetime, sats):
-        relevant_eph = dict([])
+        relevant_eph = dict()
         for sat in sats:
-            if sat not in self.sats_data:
-                print("Data for satellite" + sat + "not found in ephemeris", file=sys.stderr)
+            if sat not in self.sats_data.keys():
+                print("Data for satellite", sat, "not found in ephemeris", file=sys.stderr)
                 continue
             sat_data = self.sats_data[sat]
             n = len(sat_data)
@@ -214,7 +228,7 @@ class NavigationData:
                 if np.abs(dt) > fit:
                     continue
             if suitable is None:
-                print("No suitable time found, closest fit at time", sat_data[min_i].toc, min_dt, "seconds away.")
+                print("No suitable fit found for satellite", sat, ", closest fit at time", sat_data[min_i].toc, min_dt / 3600, "hours away.")
                 continue
             relevant_eph[sat] = suitable
         return relevant_eph
@@ -223,9 +237,10 @@ class NavigationData:
 def main():
     filename = input()
     observation_data = ObservationData.process_rinex(filename)
-    observable_data, observ_timestamps = ObservationData.get_observable_data(observation_data, only_gps=True)
-    c_one_ttx_nanos = ObservationData.extract_pr_ttx(observable_data, observ_timestamps)
+    observable_data = ObservationData.get_observable_data(observation_data, only_gps=True)
+    c_one_ttx_nanos = ObservableData.extract_pr_ttx(observable_data)
 
+    observ_timestamps = observable_data.timestamps
     with open(filename[0:-3] + "txt", "w") as f:
         with redirect_stdout(f):
             for i in range(len(c_one_ttx_nanos)):
@@ -234,12 +249,11 @@ def main():
                     gps_time = observ_timestamps[i] - datetime.datetime(1980, 1, 6)
                     print('Raw,', end="")
                     data[12] = 9
-                    data[27] = 1 if sat[0] == 'G' else 5
+                    data[27] = 1 if sat[0] == 'G' else 5 if sat[0] == 'R' else 0
                     data[4] = int(-gps_time.total_seconds() * 10 ** 9)
                     data[10] = int(sat[1:])
                     data[13] = c_one_ttx_nanos[i][sat]
                     print(*data, sep=",")
-        print(observation_data.station_coord)
 
 
 if __name__ == '__main__':

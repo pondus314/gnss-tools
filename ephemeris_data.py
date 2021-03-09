@@ -1,6 +1,5 @@
 import datetime
 import numpy as np
-import scipy.constants
 import constants
 import sys
 
@@ -34,19 +33,17 @@ IODC = 26
 TRANSMISSION_T = 27
 INTERVAL_H = 28
 
-F = -2 * np.sqrt(constants.MU) / scipy.constants.c
-
 
 class EphemerisData:
     def __init__(self, toc, data):
-        self.toc: datetime.datetime = toc
+        self.toc: datetime.datetime = toc  # this is in GPS time, not UTC time,
         self.data = data[:28]
-        if self.data[INTERVAL_H] != 0:
-            self.fit_interval = self.data[INTERVAL_H] * 3600
+        if data[INTERVAL_H] != 0:
+            self.fit_interval = data[INTERVAL_H] * 1800  # the time interval is symmetric, so multiply by 0.5h
         else:
-            self.fit_interval = 4 * 3600
+            self.fit_interval = 2 * 3600  # same here, default time interval is 4 hours total, 2 before, 2 after
 
-    def get_Ek(self, gps_time):
+    def get_ek(self, gps_time):
         def inner(iters):
             if iters == 0:
                 return m_k
@@ -73,7 +70,7 @@ class EphemerisData:
         return dtsv - self.data[TGD]
 
     def get_dtsv_relativistic(self, gps_time, gps_week):
-        dt_rel = F * self.data[E] * self.data[SQRT_A] * np.sin(self.get_Ek(gps_time))
+        dt_rel = constants.F_REL * self.data[E] * self.data[SQRT_A] * np.sin(self.get_ek(gps_time))
         return self.get_dtsvs(gps_time, gps_week) + dt_rel
 
     def get_position(self, gps_time):
@@ -81,8 +78,8 @@ class EphemerisData:
         t_k = np.mod((gps_time - self.data[TOE] + 302400.), 604800.) - 302400.
         if np.abs(t_k) > self.fit_interval:
             print("Requested time", np.abs(t_k) - self.fit_interval, "outside of fit interval", file=sys.stderr)
-        e_k = self.get_Ek(gps_time)
-        nu_k = 2 * np.arctan2(np.sqrt((1+self.data[E])/(1 - self.data[E]))*np.tan(e_k))
+        e_k = self.get_ek(gps_time)
+        nu_k = 2 * np.arctan(np.sqrt((1 + self.data[E]) / (1 - self.data[E])) * np.tan(e_k/2))
         if e_k * nu_k < 0:
             nu_k += np.pi
         phi_k = nu_k + self.data[OMEGA_LOWER]

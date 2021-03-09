@@ -1,5 +1,9 @@
-/ref/
 /venv/
-.idea/
 __pycache__/
 *.pyc
+
+.idea/
+
+/eph/
+/ref/
+/measurements/
