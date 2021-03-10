@@ -1,23 +1,23 @@
-from contextlib import redirect_stdout
-
 import rinex_processing
 import numpy as np
 import constants
 import datetime
 import positioning
 import pyproj
+import bisect
 
-REFERENCE= False
+REFERENCE = False
+
 
 class RawMeasurementData:
-    def __init__(self, ttx_nanos, ttx_uncertainty_nanos, snr_db, gps_week, gps_sec):
+    def __init__(self, ttx_nanos, ttx_uncertainty_nanos, gps_week, gps_sec, leap_second):
         self.ttx_secs = ttx_nanos*10**(-9)
         self.ttx_uncertainty_nanos = ttx_uncertainty_nanos
-        self.snr_db = snr_db
         self.gps_week = gps_week
         self.gps_sec = gps_sec
-        self.timestamp = datetime.datetime(1980, 1, 6) + datetime.timedelta(weeks=gps_week, seconds=gps_sec)
-        self.sat_timestamp = self.timestamp - datetime.timedelta(seconds=ttx_nanos**(-9))
+        self.timestamp = constants.GPS_EPOCH + datetime.timedelta(weeks=gps_week, seconds=gps_sec)
+        self.sat_timestamp = constants.GPS_EPOCH + datetime.timedelta(weeks=gps_week, microseconds=ttx_nanos*10**(-3))
+        self.leap_second = leap_second
 
 
 def process_google_data(filename):
@@ -41,7 +41,7 @@ def process_google_data(filename):
         state = int(line_data[13])
         ttx_nanos = int(line_data[14])
         ttx_uncert_nanos = int(line_data[15])
-        snr_db = float(line_data[27])
+        # snr_db = float(line_data[27])
         constell = int(line_data[28])
         if not (state & 1 and state & 8):
             continue
@@ -56,7 +56,7 @@ def process_google_data(filename):
         gps_total_sec = 10 ** (-9) * (time_nanos - full_bias_nanos)
         gps_week, gps_time = np.divmod(gps_total_sec, constants.WEEK_SECONDS)
         sat_id = "{}{:02d}".format(constants.CONSTELL_CODES[constell], svid)
-        measurement_data = RawMeasurementData(ttx_nanos, ttx_uncert_nanos, snr_db, gps_week, gps_time)
+        measurement_data = RawMeasurementData(ttx_nanos, ttx_uncert_nanos, gps_week, gps_time, leap_second)
         measurement_set[sat_id] = measurement_data
     else:
         measurements.append(measurement_set)
@@ -64,34 +64,75 @@ def process_google_data(filename):
 
 
 def main():
-    refname = "ref/newr336o.20o"
-    filename = "measurements/gnss_logger_2020_12_01_14_31_25.txt"
-    ephname = "eph/hour3360.20n"
+    refname = "ref/sneo053m.21o"
+    filename = "measurements/gnss_log_2021_02_22_12_31_38.txt"
+    ephname = "eph/hour0530.21n"
+
+    print("Beginning processing, loading ephemeris data from \"{}\"".format(ephname))
+    eph_data = rinex_processing.NavigationData.process_gps_rinex(ephname)
+
+    print("Ephemeris data loaded, now loading measured data from \"{}\"".format(filename))
+    uncorrected_data = process_google_data(filename)
+    n = len(uncorrected_data)
+    positions_xyz = []
+    print("Measurement data loaded, now", end=" ")
+
     if REFERENCE:
-        print("Loading reference data from", refname)
+        print("Loading reference data from\"{}\"".format(refname))
         observation_data = rinex_processing.ObservationData.process_rinex(refname)
         observ_data = rinex_processing.ObservationData.get_observable_data(observation_data, only_gps=True)
         ref_c_one_ttx = rinex_processing.ObservableData.extract_pr_ttx(observ_data)
+        coord_array = np.array(observation_data.station_coord)
+
+        print("Reference data loaded, now running differential correction")
+        for i in range(n):
+            for sat in uncorrected_data[i].keys():                      # Go through all of the uncorrected data sats
+                timestamp = uncorrected_data[i][sat].sat_timestamp      # ttx as a datetime
+                if sat not in observ_data.sat_timestamps.keys():
+                    continue
+                sat_timestamps = observ_data.sat_timestamps[sat]
+                sat_indices = observ_data.sat_indices[sat]
+
+                i_sat = bisect.bisect_left(sat_timestamps, timestamp)   # Get index of the closest larger timestamp
+                if i_sat != 0:                                          # present in the reference data
+                    if sat_timestamps[i_sat] - timestamp > timestamp - sat_timestamps[i_sat - 1]:
+                        i_sat -= 1
+
+                i_ref = sat_indices[i_sat]
+                ref_timestamp = observ_data.timestamps[i_ref]
+                eph_dict = eph_data.get_relevant_ephemeris({sat: ref_timestamp}, sats=[sat])
+
+                if len(eph_dict) == 0:
+                    continue
+
+                ttx_secs = ref_c_one_ttx[i_ref][sat] * 10 ** (-9)
+                eph = eph_dict[sat]
+                dtsv = eph.get_dtsv_relativistic(ttx_secs, uncorrected_data[i][sat].gps_week)
+                sat_pos = np.array(eph.get_position(ttx_secs - dtsv))
+                pr_real = np.linalg.norm(sat_pos - coord_array)
+                pr_obs = observ_data.observable_data[i_ref][sat]
+                dif_m = pr_real - pr_obs
+                uncorrected_data[i][sat].ttx_secs -= dif_m / constants.C
+
+        used_data = uncorrected_data
+        print("Differential correction finished, now calculating positions")
+
     else:
-        print("Reference data not being used in this run")
-    print("Reference data loaded, now loading ephemeris data from", ephname)
-    eph_data = rinex_processing.NavigationData.process_gps_rinex(ephname)
-    print("Ephemeris data loaded, now loading measured data from", filename)
-    record_data = process_google_data(filename)
-    positions_xyz = []
-    print("Measurement data loaded, now calculating positions")
-    for i in range(len(record_data)):
+        used_data = uncorrected_data
+        print("calculating positions")
+
+    for i in range(n):
         sat_positions = []
         sat_pr_metres = []
         user_t = 0
-        if len(record_data[i]) < 4:
+        if len(used_data[i]) < 4:
             continue
-        for sat in record_data[i].keys():
-            raw_data = record_data[i][sat]
-            relevant_eph = eph_data.get_relevant_ephemeris(raw_data.sat_timestamp, [sat])
-            if len(relevant_eph) < 1:
-                continue
-            eph = relevant_eph[sat]
+        sats = used_data[i].keys()
+        sat_timestamps = list(map(lambda x: used_data[i][x].sat_timestamp, sats))
+        relevant_ephs = eph_data.get_relevant_ephemeris(dict(zip(sats, sat_timestamps)), sats)
+        for sat in used_data[i].keys():
+            raw_data = used_data[i][sat]
+            eph = relevant_ephs[sat]
             dtsv = eph.get_dtsv_relativistic(raw_data.ttx_secs, raw_data.gps_week)
             sat_pos = eph.get_position(raw_data.ttx_secs - dtsv)
             sat_positions.append(sat_pos + [raw_data.ttx_secs - dtsv])
@@ -104,14 +145,30 @@ def main():
                                             method="LS",
                                             user_xyzt_guess=np.array([0, 0, 0, user_t]))
         positions_xyz.append(position.squeeze())
+
     pos_array = np.array(positions_xyz)
-    print("positions calculated, now transforming to lat long")
+    n_after = len(positions_xyz)
+    print("Positions calculated, now transforming to lat long")
+
     ecef = pyproj.Proj(proj='geocent', ellps='WGS84', datum='WGS84')
     lla = pyproj.Proj(proj='latlong', ellps='WGS84', datum='WGS84')
     transformer = pyproj.Transformer.from_proj(proj_from=ecef, proj_to=lla)
-    positions = np.array(transformer.transform(pos_array[:, 0], pos_array[:, 1], pos_array[:, 2], radians=False)).T[:, [1, 0, 2]]
-    np.savetxt(filename[0:-3] + "csv", positions, delimiter=",", header="lat, lon, alt", fmt=["%.8f", "%.8f", "%2d"])
-    print("Lat Long positions calculated, saved in file", filename[0:-3] + "csv")
+    positions_lla = transformer.transform(pos_array[:, 0],
+                                          pos_array[:, 1],
+                                          pos_array[:, 2],
+                                          radians=False)
+    positions = np.zeros([n_after, 4])
+    positions[:, :3] = np.array(positions_lla).T[:, [1, 0, 2]]
+    positions[:, 3] = np.array(pos_array[:, 3])
+
+    outname = "results" + filename[12:-3] + "csv"
+    np.savetxt(outname,
+               positions,
+               delimiter=",",
+               header="lat,lon,alt,time",
+               fmt=["%.8f", "%.8f", "%.2f", "%2d"],
+               comments="")
+    print("Lat Long positions calculated, saved in file \"", outname, "\"", sep="")
 
 
 if __name__ == '__main__':

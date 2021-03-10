@@ -5,6 +5,7 @@ import constants
 def pos_solution(sat_xyzt, pr_metres, user_xyzt_guess=np.array([0, 0, 0, 0], np.float64), method="LS", weights=None):
     n = sat_xyzt.shape[0]
     user_xyzt_guess = user_xyzt_guess[np.newaxis].T
+    time_delta = 0
     for i in range(30):
         r_hat_vec = sat_xyzt[:, 0:3]-user_xyzt_guess[0:3].T
         r_hat = np.linalg.norm(r_hat_vec, axis=1)[np.newaxis]

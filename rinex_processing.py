@@ -1,6 +1,8 @@
 import datetime
 from contextlib import redirect_stdout
 from typing import List, Union, Dict
+
+import constants
 import ephemeris_data
 import sys
 import numpy as np
@@ -16,16 +18,22 @@ def parse_rinex_decimal(rinex_decimal: str):
 class ObservableData:
     def __init__(self,
                  timestamps: List[datetime.datetime],
+                 sat_timestamps: Dict[str, List[datetime.datetime]],
+                 sat_indices: Dict[str, List[int]],
                  obs_data: List[Dict[str, Union[int, float]]],
                  obs_name: str,
                  pr_type: bool):
         self.timestamps = timestamps
+        self.sat_timestamps = sat_timestamps
+        self.sat_indices = sat_indices
         self.observable_data = obs_data
         self.obs_name = obs_name
         self.pr_type = pr_type
 
     @staticmethod
     def extract_pr_ttx(obs_data):
+        if not obs_data.pr_type:
+            raise NotImplemented
         obs_ttx = []
         lightspeed = 299792458
         timestamps = obs_data.timestamps
@@ -126,24 +134,40 @@ class ObservationData:
 
     @staticmethod
     def get_observable_data(obs_data, observ="C1", only_gps=False):
-        # returns observable data as a list of dicts from Satellite identifier to list of ovservations of the observable
+        # returns observable data as a list of dicts from Satellite identifier to list of observations of the observable
         # also returns the list of relevant timestamps for the returned data
         observ_data = []
         timestamps_out = []
         sat_data = obs_data.sat_data
+        sats_timestamps = dict()
+        sats_indices = dict()
+        index = 0
         for i in range(obs_data.measurement_count):
             obs = dict()
             date = obs_data.timestamps[i]
+
             for sat in sat_data[i].keys():
                 if only_gps and not sat.startswith("G"):
                     continue
                 if observ in sat_data[i][sat]:
+                    sat_indices = sats_indices.get(sat, [])
+                    sat_timestamps = sats_timestamps.get(sat, [])
+                    sats_indices[sat] = sat_indices + [index]
+                    sats_timestamps[sat] = sat_timestamps + [date]
+
                     data = sat_data[i][sat][observ]
                     obs[sat] = data
+
             if len(obs) > 0:
+                index += 1
                 observ_data.append(obs)
                 timestamps_out.append(date)
-        return ObservableData(timestamps_out, observ_data, observ, (observ.startswith("C") or observ.startswith("P")))
+        return ObservableData(timestamps_out,
+                              sats_timestamps,
+                              sats_indices,
+                              observ_data,
+                              observ,
+                              (observ.startswith("C") or observ.startswith("P")))
 
 
 class NavigationData:
@@ -204,9 +228,10 @@ class NavigationData:
 
         return cls(sats_data, ion_data=ion_data, delta_utc=delta_utc, leap_secs=leap_secs)
 
-    def get_relevant_ephemeris(self, timestamp: datetime.datetime, sats):
+    def get_relevant_ephemeris(self, timestamps: Dict[str, datetime.datetime], sats: List[str]):
         relevant_eph = dict()
         for sat in sats:
+            timestamp = timestamps[sat]
             if sat not in self.sats_data.keys():
                 print("Data for satellite", sat, "not found in ephemeris", file=sys.stderr)
                 continue
@@ -246,7 +271,7 @@ def main():
             for i in range(len(c_one_ttx_nanos)):
                 for sat in c_one_ttx_nanos[i].keys():
                     data = [0 for i in range(31)]
-                    gps_time = observ_timestamps[i] - datetime.datetime(1980, 1, 6)
+                    gps_time = observ_timestamps[i] - constants.GPS_EPOCH
                     print('Raw,', end="")
                     data[12] = 9
                     data[27] = 1 if sat[0] == 'G' else 5 if sat[0] == 'R' else 0

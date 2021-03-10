@@ -60,7 +60,7 @@ class EphemerisData:
         return np.mod(inner(10) + np.pi, 2 * np.pi) - np.pi
 
     def get_dt(self, gps_time, gps_week):
-        time = datetime.datetime(1980, 1, 6, 0, 0, 0) + datetime.timedelta(weeks=gps_week, seconds=gps_time)
+        time = constants.GPS_EPOCH + datetime.timedelta(weeks=gps_week, seconds=gps_time)
         dt = (time - self.toc).total_seconds()
         return dt
 
