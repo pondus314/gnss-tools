@@ -1,4 +1,5 @@
 import numpy as np
+import statsmodels.api as sm
 import constants
 
 
@@ -13,11 +14,17 @@ def pos_solution(sat_xyzt, pr_metres, user_xyzt_guess=np.array([0, 0, 0, 0], np.
         H[:, :-1] = r_hat_vec/r_hat.T
         del_rho = (r_hat - pr_metres).T
         if method == "LS":
-            (guess_delta, _, _, _) = np.linalg.lstsq(H, del_rho, rcond=None)
+            (guess_delta, residuals, _, _) = np.linalg.lstsq(H, del_rho, rcond=None)
+
         elif method == "SPS":
             H = H[:4, :]
             del_rho = del_rho[:4, :]
             guess_delta = np.linalg.solve(H, del_rho)
+        elif method == "WLS":
+            W = np.sqrt(np.diag(weights))
+            H_w = np.dot(W, H)
+            Rho_w = np.dot(del_rho.T, W)
+            (guess_delta, residuals, _, _) = np.linalg.lstsq(H_w, Rho_w.T, rcond=None)
         else:
             raise NotImplemented("Implemented methods of solution are \"LS\" or \"SPS\"")
         user_xyzt_guess[0:3] += guess_delta[0:3]
@@ -28,6 +35,6 @@ def pos_solution(sat_xyzt, pr_metres, user_xyzt_guess=np.array([0, 0, 0, 0], np.
     return user_xyzt_guess
 
 
-def differential_correction():
+def differential_correction(precise_position,):
     # TODO implement this function
     return None

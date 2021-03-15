@@ -35,7 +35,6 @@ class ObservableData:
         if not obs_data.pr_type:
             raise NotImplemented
         obs_ttx = []
-        lightspeed = 299792458
         timestamps = obs_data.timestamps
         pr_data = obs_data.observable_data
         for i in range(len(pr_data)):
@@ -45,11 +44,32 @@ class ObservableData:
             ttx = dict()
             for sat in pr_data[i].keys():
                 pr = pr_data[i][sat]
-                pr_nanos = (pr * 10 ** 9) / lightspeed
+                pr_nanos = (pr * 10 ** 9) / constants.C
                 ttx_nanos = week_nanos - pr_nanos
                 ttx[sat] = ttx_nanos
             obs_ttx.append(ttx)
         return obs_ttx
+
+    @staticmethod
+    def extract_pr_correction(obs_data, station_coord, ephemeris_all):
+        obs_ttx = ObservableData.extract_pr_ttx(obs_data)
+        corrections = []
+        for i in range(len(obs_data.timestamps)):
+            corrections_i = {}
+            date = obs_data.timestamps[i]
+            sats = list(obs_data.observable_data.keys())
+            timestamps = dict(zip(sats, [obs_data.timestamps[i] for _ in range(len(sats))]))
+            relevant_ephs = ephemeris_all.get_relevant_ephemeris(timestamps, sats)
+            for sat in sats:
+                sat_eph = relevant_ephs[sat]
+                gps_week = (timestamps[i] - constants.GPS_EPOCH).days // 7
+                dtsv = sat_eph.get_dtsv_relativistic(obs_ttx, gps_week)
+                sat_pos = sat_eph.get_position(obs_ttx[i][sat] - dtsv)
+                physical_range = np.linalg.norm(np.array(sat_pos) - np.array(station_coord))
+                pr_m = obs_data.observable_data[i][sat] + constants.C * dtsv
+                corrections_i[sat] = physical_range - pr_m
+            corrections.append(corrections_i)
+        return corrections
 
 
 class ObservationData:

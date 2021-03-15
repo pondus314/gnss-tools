@@ -9,3 +9,4 @@ F_REL = -2 * np.sqrt(MU) / (C**2)
 WEEK_SECONDS = 3600*24*7
 CONSTELL_CODES = ["_", "G", "?", "R", "J", "C", "E", "I"]
 GPS_EPOCH = datetime.datetime(1980, 1, 6)
+MAX_REF_DIF = datetime.timedelta(minutes=2)
