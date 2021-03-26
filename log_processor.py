@@ -1,4 +1,5 @@
 import sys
+from typing import List, Dict
 
 import rinex_processing
 import numpy as np
@@ -9,7 +10,8 @@ import pyproj
 import bisect
 
 REFERENCE = True
-method = "WLS"
+METHOD = "WLS"
+REJECT_OUTLIERS = True
 
 
 class RawMeasurementData:
@@ -68,8 +70,68 @@ def process_google_data(filename):
     return measurements
 
 
+def reject_outliers(data, m=2.):
+    d = np.abs(data - np.median(data))
+    mdev = np.median(d)
+    s = d / (mdev if mdev else 1.)
+    return np.array(range(len(data)))[s < m]
+
+
+def get_positioning_solution(raw_data: List[Dict[str, RawMeasurementData]], eph_data, method):
+
+    n = len(raw_data)
+    positions_xyz = []
+    for i in range(n):
+        sat_positions = []
+        sat_weights = []
+        sat_pr_metres = []
+        user_t = 0
+        if len(raw_data[i]) < 4:
+            continue
+        sats = raw_data[i].keys()
+        sat_timestamps = list(map(lambda x: raw_data[i][x].sat_timestamp, sats))
+        relevant_ephs = eph_data.get_relevant_ephemeris(dict(zip(sats, sat_timestamps)), sats)
+        for sat in raw_data[i].keys():
+            measurement_data = raw_data[i][sat]
+            eph = relevant_ephs[sat]
+            dtsv = eph.get_dtsv_relativistic(measurement_data.ttx_secs, measurement_data.gps_week)
+            ttx_corrected = measurement_data.ttx_secs - dtsv
+            sat_pos = eph.get_position(ttx_corrected)
+            sat_positions.append(sat_pos + [ttx_corrected])
+            sat_pr_metres.append(constants.C * (measurement_data.gps_sec - ttx_corrected + measurement_data.correction))
+            sat_weights.append(1. / measurement_data.ttx_uncertainty_nanos)
+            user_t = measurement_data.gps_sec
+        if len(sat_positions) < 4:
+            continue
+        position = positioning.pos_solution(np.array(sat_positions),
+                                            np.array(sat_pr_metres),
+                                            method=method,
+                                            user_xyzt_guess=np.array([0, 0, 0, user_t]),
+                                            weights=sat_weights)
+        position = position.squeeze()
+        if REJECT_OUTLIERS:
+            offsets = np.array([np.linalg.norm(sat_positions[i][0:3] - position[0:3]) - sat_pr_metres[i] for i in range(len(raw_data[i]))])
+            m = 2.
+            to_reuse = reject_outliers(offsets)
+            while len(to_reuse) < 4:
+                m = m * 1.2
+                to_reuse = reject_outliers(offsets, m)
+            sat_positions_rejected = np.array(sat_positions)[to_reuse]
+            sat_pr_metres_rejected = np.array(sat_pr_metres)[to_reuse]
+            sat_weights_rejected = np.array(sat_weights)[to_reuse]
+            position_improved = positioning.pos_solution(np.array(sat_positions_rejected),
+                                                         np.array(sat_pr_metres_rejected),
+                                                         method=method,
+                                                         user_xyzt_guess=np.array([0, 0, 0, user_t]),
+                                                         weights=sat_weights_rejected)
+            positions_xyz.append(position_improved.squeeze())
+        else:
+            positions_xyz.append(position)
+    return positions_xyz
+
+
 def main():
-    refname = "ref/stee336o.20o"
+    refname = "ref/sneo336o.20o"
     filename = "measurements/gnss_logger_2020_12_01_14_31_25.txt"
     ephname = "eph/hour3360.20n"
 
@@ -79,7 +141,6 @@ def main():
     print("Ephemeris data loaded, now loading measured data from \"{}\"".format(filename))
     uncorrected_data = process_google_data(filename)
     n = len(uncorrected_data)
-    positions_xyz = []
     print("Measurement data loaded, now", end=" ")
 
     if REFERENCE:
@@ -129,7 +190,7 @@ def main():
                 pr_real = np.linalg.norm(sat_pos - coord_array)
                 pr_obs = observ_data.observable_data[i_ref][sat] + dtsv * constants.C
                 dif_m = pr_real - pr_obs
-                uncorrected_data[i][sat].ttx_secs -= dif_m / constants.C
+                uncorrected_data[i][sat].correction += dif_m / constants.C
 
             for sat in to_remove:
                 uncorrected_data[i].pop(sat)
@@ -141,35 +202,7 @@ def main():
         used_data = uncorrected_data
         print("calculating positions")
 
-    for i in range(n):
-        sat_positions = []
-        sat_weights = []
-        sat_pr_metres = []
-        user_t = 0
-        if len(used_data[i]) < 4:
-            continue
-        sats = used_data[i].keys()
-        sat_timestamps = list(map(lambda x: used_data[i][x].sat_timestamp, sats))
-        relevant_ephs = eph_data.get_relevant_ephemeris(dict(zip(sats, sat_timestamps)), sats)
-        for sat in used_data[i].keys():
-            raw_data = used_data[i][sat]
-            eph = relevant_ephs[sat]
-            dtsv = eph.get_dtsv_relativistic(raw_data.ttx_secs, raw_data.gps_week)
-            ttx_corrected = raw_data.ttx_secs - dtsv
-            sat_pos = eph.get_position(ttx_corrected)
-            sat_positions.append(sat_pos + [ttx_corrected])
-            sat_pr_metres.append(constants.C * (raw_data.gps_sec - ttx_corrected))
-            sat_weights.append(1. / raw_data.ttx_uncertainty_nanos)
-            user_t = raw_data.gps_sec
-        if len(sat_positions) < 4:
-            continue
-        position = positioning.pos_solution(np.array(sat_positions),
-                                            np.array(sat_pr_metres),
-                                            method=method,
-                                            user_xyzt_guess=np.array([0, 0, 0, user_t]),
-                                            weights=sat_weights)
-        position = position.squeeze()
-        positions_xyz.append(position)
+    positions_xyz = get_positioning_solution(used_data, eph_data, METHOD)
 
     pos_array = np.array(positions_xyz)
     n_after = len(positions_xyz)
@@ -185,7 +218,8 @@ def main():
     positions = np.zeros([n_after, 4])
     positions[:, :3] = np.array(positions_lla).T[:, [1, 0, 2]]
     positions[:, 3] = np.array(pos_array[:, 3])
-    outname = "results" + filename[12:-4] + "_" + method + ("_ref" if REFERENCE else "") + ".csv"
+    outname = "results" + filename[12:-4] + "_" + METHOD + ("_ref" if REFERENCE else "") \
+              + ("_rej" if REJECT_OUTLIERS else "")+ ".csv"
     np.savetxt(outname,
                positions,
                delimiter=",",
