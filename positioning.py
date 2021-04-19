@@ -1,10 +1,11 @@
 import numpy as np
-import statsmodels.api as sm
 import constants
+import corrections
 
 
-def pos_solution(sat_xyzt, pr_metres, user_xyzt_guess=np.array([0, 0, 0, 0], np.float64), method="LS", weights=None):
-    n = sat_xyzt.shape[0]
+def pos_solution(sat_ecef, pr_metres, user_xyzt_guess=np.array([0, 0, 0, 0], np.float64), method="LS", weights=None):
+    n = sat_ecef.shape[0]
+    sat_xyzt = corrections.ecef_to_eci(sat_ecef, pr_metres)
     user_xyzt_guess = user_xyzt_guess[np.newaxis].T
     time_delta = 0
     for i in range(30):
@@ -33,8 +34,3 @@ def pos_solution(sat_xyzt, pr_metres, user_xyzt_guess=np.array([0, 0, 0, 0], np.
             break
     user_xyzt_guess[3] += time_delta
     return user_xyzt_guess
-
-
-def differential_correction(precise_position,):
-    # TODO implement this function
-    return None

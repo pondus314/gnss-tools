@@ -297,7 +297,8 @@ def main():
                     data[27] = 1 if sat[0] == 'G' else 5 if sat[0] == 'R' else 0
                     data[4] = int(-gps_time.total_seconds() * 10 ** 9)
                     data[10] = int(sat[1:])
-                    data[13] = c_one_ttx_nanos[i][sat]
+                    data[13] = int(c_one_ttx_nanos[i][sat])
+                    data[14] = 1
                     print(*data, sep=",")
 
 

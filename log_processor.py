@@ -8,10 +8,9 @@ import datetime
 import positioning
 import pyproj
 import bisect
-
-REFERENCE = True
-METHOD = "WLS"
-REJECT_OUTLIERS = True
+import scipy.signal as signal
+import config as cfg
+import corrections
 
 
 class RawMeasurementData:
@@ -25,6 +24,7 @@ class RawMeasurementData:
                                                                       microseconds=ttx_nanos * 10 ** (-3))
         self.leap_second = leap_second
         self.correction = correction
+        self.sat_xyz = None
 
 
 def process_google_data(filename):
@@ -87,6 +87,7 @@ def get_positioning_solution(raw_data: List[Dict[str, RawMeasurementData]], eph_
         sat_pr_metres = []
         user_t = 0
         if len(raw_data[i]) < 4:
+            positions_xyz.append(np.array([0., 0., 0., -np.inf]))
             continue
         sats = raw_data[i].keys()
         sat_timestamps = list(map(lambda x: raw_data[i][x].sat_timestamp, sats))
@@ -96,10 +97,14 @@ def get_positioning_solution(raw_data: List[Dict[str, RawMeasurementData]], eph_
             eph = relevant_ephs[sat]
             dtsv = eph.get_dtsv_relativistic(measurement_data.ttx_secs, measurement_data.gps_week)
             ttx_corrected = measurement_data.ttx_secs - dtsv
-            sat_pos = eph.get_position(ttx_corrected)
+            if measurement_data.sat_xyz is None:
+                sat_pos = eph.get_position(ttx_corrected)
+                measurement_data.sat_xyz = sat_pos
+            else:
+                sat_pos = measurement_data.sat_xyz
             sat_positions.append(sat_pos + [ttx_corrected])
             sat_pr_metres.append(constants.C * (measurement_data.gps_sec - ttx_corrected + measurement_data.correction))
-            sat_weights.append(1. / measurement_data.ttx_uncertainty_nanos)
+            sat_weights.append(1. / measurement_data.ttx_uncertainty_nanos**2)
             user_t = measurement_data.gps_sec
         if len(sat_positions) < 4:
             continue
@@ -109,8 +114,9 @@ def get_positioning_solution(raw_data: List[Dict[str, RawMeasurementData]], eph_
                                             user_xyzt_guess=np.array([0, 0, 0, user_t]),
                                             weights=sat_weights)
         position = position.squeeze()
-        if REJECT_OUTLIERS:
-            offsets = np.array([np.linalg.norm(sat_positions[i][0:3] - position[0:3]) - sat_pr_metres[i] for i in range(len(raw_data[i]))])
+        if cfg.REJECT_OUTLIERS:
+            offsets = np.array([np.linalg.norm(sat_positions[i][0:3] - position[0:3]) -
+                                sat_pr_metres[i] for i in range(len(raw_data[i]))])
             m = 2.
             to_reuse = reject_outliers(offsets)
             while len(to_reuse) < 4:
@@ -130,10 +136,24 @@ def get_positioning_solution(raw_data: List[Dict[str, RawMeasurementData]], eph_
     return positions_xyz
 
 
+def ecef_to_lla(pos_array):
+    n_after = len(pos_array)
+    ecef = pyproj.Proj(proj='geocent', ellps='WGS84', datum='WGS84')
+    lla = pyproj.Proj(proj='latlong', ellps='WGS84', datum='WGS84')
+    transformer = pyproj.Transformer.from_proj(proj_from=ecef, proj_to=lla)
+    positions_lla = transformer.transform(pos_array[:, 0],
+                                          pos_array[:, 1],
+                                          pos_array[:, 2],
+                                          radians=False)
+    positions = np.zeros([n_after, 4])
+    positions[:, :3] = np.array(positions_lla).T[:, [1, 0, 2]]
+    positions[:, 3] = np.array(pos_array[:, 3])
+    return positions
+
+
 def main():
-    refname = "ref/sneo336o.20o"
-    filename = "measurements/gnss_logger_2020_12_01_14_31_25.txt"
-    ephname = "eph/hour3360.20n"
+    ephname = cfg.EPHNAME
+    filename = cfg.FILENAME
 
     print("Beginning processing, loading ephemeris data from \"{}\"".format(ephname))
     eph_data = rinex_processing.NavigationData.process_gps_rinex(ephname)
@@ -143,7 +163,8 @@ def main():
     n = len(uncorrected_data)
     print("Measurement data loaded, now", end=" ")
 
-    if REFERENCE:
+    if cfg.REFERENCE:
+        refname = cfg.REFNAME
         print("Loading reference data from\"{}\"".format(refname))
         observation_data = rinex_processing.ObservationData.process_rinex(refname)
         observ_data = rinex_processing.ObservationData.get_observable_data(observation_data, only_gps=True)
@@ -186,42 +207,62 @@ def main():
                 ttx_secs = ref_c_one_ttx[i_ref][sat] * 10 ** (-9)
                 eph = eph_dict[sat]
                 dtsv = eph.get_dtsv_relativistic(ttx_secs, uncorrected_data[i][sat].gps_week)
-                sat_pos = np.array(eph.get_position(ttx_secs - dtsv))
-                pr_real = np.linalg.norm(sat_pos - coord_array)
+                sat_pos_ecef = np.array(eph.get_position(ttx_secs - dtsv))
                 pr_obs = observ_data.observable_data[i_ref][sat] + dtsv * constants.C
+                sat_pos_eci = corrections.ecef_to_eci(np.array([sat_pos_ecef]), np.array([pr_obs]))
+                pr_real = np.linalg.norm(sat_pos_eci - coord_array)
+                sat_pos_eci = corrections.ecef_to_eci(np.array([sat_pos_ecef]), np.array([pr_real]))
+                pr_real = np.linalg.norm(sat_pos_eci - coord_array)
                 dif_m = pr_real - pr_obs
                 uncorrected_data[i][sat].correction += dif_m / constants.C
 
             for sat in to_remove:
                 uncorrected_data[i].pop(sat)
 
-        used_data = uncorrected_data
         print("Differential correction finished, now calculating positions")
 
     else:
-        used_data = uncorrected_data
         print("calculating positions")
 
-    positions_xyz = get_positioning_solution(used_data, eph_data, METHOD)
+    used_data = uncorrected_data
 
-    pos_array = np.array(positions_xyz)
-    n_after = len(positions_xyz)
-    print("Positions calculated, now transforming to lat long")
+    for j in range(2):
+        positions_xyz = np.array(get_positioning_solution(used_data, eph_data, cfg.METHOD))
 
-    ecef = pyproj.Proj(proj='geocent', ellps='WGS84', datum='WGS84')
-    lla = pyproj.Proj(proj='latlong', ellps='WGS84', datum='WGS84')
-    transformer = pyproj.Transformer.from_proj(proj_from=ecef, proj_to=lla)
-    positions_lla = transformer.transform(pos_array[:, 0],
-                                          pos_array[:, 1],
-                                          pos_array[:, 2],
-                                          radians=False)
-    positions = np.zeros([n_after, 4])
-    positions[:, :3] = np.array(positions_lla).T[:, [1, 0, 2]]
-    positions[:, 3] = np.array(pos_array[:, 3])
-    outname = "results" + filename[12:-4] + "_" + METHOD + ("_ref" if REFERENCE else "") \
-              + ("_rej" if REJECT_OUTLIERS else "")+ ".csv"
+        if cfg.FILTERING:
+            sos = signal.butter(4, cfg.FILTER_SENSITIVITY, output='sos')
+            splits = np.concatenate(([-1], (np.diff(positions_xyz[:, 3], axis=0) > 10).nonzero()[0], [positions_xyz.shape[0]]))
+            for i in range(len(splits) - 1):
+                padlen = 3 * (2 * len(sos) + 1 - min((sos[:, 2] == 0).sum(), (sos[:, 5] == 0).sum()))
+
+                if splits[i+1] - splits[i] < padlen:
+                    continue
+                positions_xyz[splits[i]+1:splits[i+1]+1, 0:3] = \
+                    signal.sosfiltfilt(sos, positions_xyz[splits[i]+1:splits[i+1]+1, 0:3], axis=0)
+
+        positions = ecef_to_lla(positions_xyz)
+
+        if cfg.REFERENCE:
+            break
+        elif j == 0:
+            for i in range(n):
+                user_xyz = positions_xyz[i, :3]
+                user_lla = positions[i, :3]
+                user_t = positions[i, 3]
+                if np.isinf(user_t):
+                    continue
+                ion_alpha = eph_data.ion_data[0]
+                ion_beta = eph_data.ion_data[1]
+                for sat in used_data[i].keys():
+                    sat_pos = used_data[i][sat].sat_xyz
+                    iono_correction = \
+                        corrections.klobuchar_correction_nanos(user_xyz, user_t, user_lla, sat_pos, ion_alpha, ion_beta)
+                    used_data[i][sat].correction += iono_correction * 10 ** (-9)
+
+    outname = "results" + filename[12:-4] + "_" + cfg.METHOD + ("_ref" if cfg.REFERENCE else "") \
+              + ("_rej" if cfg.REJECT_OUTLIERS else "") + ("_filt" if cfg.FILTERING else "") + ".csv"
     np.savetxt(outname,
-               positions,
+               positions[~np.isinf(positions).any(axis=1)],
                delimiter=",",
                header="lat,lon,alt,time",
                fmt=["%.8f", "%.8f", "%.2f", "%2d"],

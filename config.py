@@ -1,0 +1,9 @@
+REFERENCE = True
+METHOD = "WLS"
+REJECT_OUTLIERS = False
+FILTERING = False
+FILTER_SENSITIVITY = 0.03
+
+REFNAME = "ref/sneo098a.21o"
+FILENAME = "measurements/gnss_log_2021_04_08_12_46_29.txt"
+EPHNAME = "eph/hour0980.21n"
