@@ -1,9 +1,10 @@
-REFERENCE = True
+REFERENCE = False
 METHOD = "WLS"
 REJECT_OUTLIERS = False
 FILTERING = False
 FILTER_SENSITIVITY = 0.03
+FORMAT_GOOGLE = False
 
-REFNAME = "ref/sneo098a.21o"
-FILENAME = "measurements/gnss_log_2021_04_08_12_46_29.txt"
-EPHNAME = "eph/hour0980.21n"
+REFNAME = "ref/sneo115a.21o"
+FILENAME = "measurements/gnss_log_2021_04_25_1808.txt"
+EPHNAME = "eph/hour1150.21n"

@@ -27,6 +27,47 @@ class RawMeasurementData:
         self.sat_xyz = None
 
 
+def process_logger_data(filename):
+    goo_f = open(filename, "r")
+    line = goo_f.readline()
+    while line.startswith("#"):
+        line = goo_f.readline()
+    i_fb_n = 0
+    measurements = []
+    measurement_set = dict()
+    first = True
+    while first or (line := goo_f.readline()):
+        first = False
+        line_data = line.split(',')
+        if line_data[0] != 'Raw':
+            continue
+        # Raw,TimeNanos,FullBiasNanos,BiasNanos,LeapSecond,Svid,ReceivedSvTimeNanos,ReceivedSvTimeUncertaintyNanos,ConstellationType
+
+        time_nanos = int(line_data[1])
+        full_bias_nanos = int(line_data[2])
+        leap_second = line_data[4]
+        svid = int(line_data[5])
+        ttx_nanos = int(line_data[6])
+        ttx_uncert_nanos = int(line_data[7])
+        constell = int(line_data[8])
+        if constell != 1:
+            continue
+        elif ttx_uncert_nanos >= 500:
+            continue
+        if i_fb_n != full_bias_nanos:
+            i_fb_n = full_bias_nanos
+            measurements.append(measurement_set)
+            measurement_set = dict()
+        gps_total_sec = 10 ** (-9) * (time_nanos - full_bias_nanos)
+        gps_week, gps_time = np.divmod(gps_total_sec, constants.WEEK_SECONDS)
+        sat_id = "{}{:02d}".format(constants.CONSTELL_CODES[constell], svid)
+        measurement_data = RawMeasurementData(ttx_nanos, ttx_uncert_nanos, gps_week, gps_time, leap_second)
+        measurement_set[sat_id] = measurement_data
+    else:
+        measurements.append(measurement_set)
+    return measurements
+
+
 def process_google_data(filename):
     goo_f = open(filename, "r")
     line = goo_f.readline()
@@ -159,7 +200,11 @@ def main():
     eph_data = rinex_processing.NavigationData.process_gps_rinex(ephname)
 
     print("Ephemeris data loaded, now loading measured data from \"{}\"".format(filename))
-    uncorrected_data = process_google_data(filename)
+    uncorrected_data = None
+    if cfg.FORMAT_GOOGLE:
+        uncorrected_data = process_google_data(filename)
+    else:
+        uncorrected_data = process_logger_data(filename)
     n = len(uncorrected_data)
     print("Measurement data loaded, now", end=" ")
 
